@@ -11,7 +11,22 @@ const sessionController = {
    * Create a new collaboration session.
    *
    * Body: { name }
-   * Response: { success, data: { session } }
+   * Response: {
+   *   success: boolean,
+   *   message: string,
+   *   data: {
+   *     session: {
+   *       id: string,
+   *       name: string,
+   *       inviteCode: string,
+   *       createdBy: string,
+   *       isActive: boolean,
+   *       createdAt: string,
+   *       updatedAt: string,
+   *       creator: { id: string, username: string }
+   *     }
+   *   }
+   * }
    */
   async create(req, res, next) {
     try {
@@ -40,7 +55,22 @@ const sessionController = {
    * GET /api/sessions
    * List all sessions the current user has created or joined.
    *
-   * Response: { success, data: { sessions } }
+   * Response: {
+   *   success: boolean,
+   *   data: {
+   *     sessions: [{
+   *       id: string,
+   *       name: string,
+   *       inviteCode: string,
+   *       createdBy: string,
+   *       isActive: boolean,
+   *       createdAt: string,
+   *       updatedAt: string,
+   *       creator: { id: string, username: string },
+   *       _count: { files: number, participants: number }
+   *     }]
+   *   }
+   * }
    */
   async list(req, res, next) {
     try {
@@ -59,7 +89,22 @@ const sessionController = {
    * GET /api/sessions/:inviteCode
    * Get session details by invite code (used when joining via shared URL).
    *
-   * Response: { success, data: { session } }
+   * Response: {
+   *   success: boolean,
+   *   data: {
+   *     session: {
+   *       id: string,
+   *       name: string,
+   *       inviteCode: string,
+   *       createdBy: string,
+   *       isActive: boolean,
+   *       createdAt: string,
+   *       updatedAt: string,
+   *       creator: { id: string, username: string },
+   *       files: [{ id: string, filename: string, language: string, updatedAt: string }]
+   *     }
+   *   }
+   * }
    */
   async getByInviteCode(req, res, next) {
     try {
@@ -80,7 +125,21 @@ const sessionController = {
    * Create a new file in a session.
    *
    * Body: { filename, language?, content? }
-   * Response: { success, data: { file } }
+   * Response: {
+   *   success: boolean,
+   *   message: string,
+   *   data: {
+   *     file: {
+   *       id: string,
+   *       sessionId: string,
+   *       filename: string,
+   *       content: string,
+   *       language: string,
+   *       createdAt: string,
+   *       updatedAt: string
+   *     }
+   *   }
+   * }
    */
   async createFile(req, res, next) {
     try {
@@ -112,7 +171,18 @@ const sessionController = {
    * GET /api/sessions/:id/files
    * List all files in a session (metadata only, no content).
    *
-   * Response: { success, data: { files } }
+   * Response: {
+   *   success: boolean,
+   *   data: {
+   *     files: [{
+   *       id: string,
+   *       filename: string,
+   *       language: string,
+   *       createdAt: string,
+   *       updatedAt: string
+   *     }]
+   *   }
+   * }
    */
   async listFiles(req, res, next) {
     try {
