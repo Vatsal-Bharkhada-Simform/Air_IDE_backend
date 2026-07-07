@@ -18,7 +18,7 @@ const app = express();
 // CORS — allow the configured frontend origin
 app.use(
   cors({
-    origin: env.CORS_ORIGIN,
+    origin: env.CORS_ORIGIN.split(",").map(origin => origin.trim()),
     credentials: true, // Allow cookies to be sent cross-origin
   })
 );
