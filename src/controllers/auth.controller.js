@@ -146,7 +146,7 @@ const authController = {
         try {
             res.status(200).json({
                 success: true,
-                data: { user: req.user },
+                data: { user: req.user, token: req.token },
             });
         } catch (error) {
             next(error);
