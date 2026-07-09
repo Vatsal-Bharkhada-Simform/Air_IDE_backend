@@ -72,6 +72,16 @@ const presenceHandler = require('./presence.handler');
  */
 const socketSessions = new Map();
 
+/**
+ * Monotonic per-file sequence counter.
+ * Map<"sessionId:fileId", number>
+ *
+ * Incremented on every file:edit event and stamped onto the outgoing
+ * file:edited broadcast. Receivers use this to detect and discard
+ * out-of-order or duplicate deltas (e.g. after a reconnect).
+ */
+const fileSeqCounters = new Map();
+
 const sessionHandler = {
   /**
    * Register session and file event handlers on a socket.
@@ -226,6 +236,9 @@ const sessionHandler = {
      * The change is NOT persisted to the database here — it's only
      * relayed to other connected users for real-time collaboration.
      * Use "file:save" to persist the current state.
+     *
+     * Each broadcast includes a monotonic `seq` number per file so
+     * receivers can detect and discard out-of-order deltas.
      */
     socket.on('file:edit', (data) => {
       const { sessionId, fileId, changes } = data;
@@ -234,12 +247,18 @@ const sessionHandler = {
         return socket.emit('error', { message: 'Invalid edit data.' });
       }
 
+      // Increment and stamp the per-file sequence number
+      const seqKey = `${sessionId}:${fileId}`;
+      const seq = (fileSeqCounters.get(seqKey) ?? 0) + 1;
+      fileSeqCounters.set(seqKey, seq);
+
       // Broadcast to everyone else in the session
       socket.to(sessionId).emit('file:edited', {
         fileId,
         changes,
         userId: socket.user.id,
         username: socket.user.username,
+        seq,
       });
     });
 
@@ -303,6 +322,17 @@ const sessionHandler = {
 
     // Remove from presence
     const presence = presenceHandler.removeUser(sessionId, socket.id);
+
+    // Clean up per-file sequence counters for this session if no users remain
+    const remainingUsers = presenceHandler.getSessionUsers(sessionId);
+    if (remainingUsers.length === 0) {
+      // Delete all seq counters whose key starts with this sessionId
+      for (const key of fileSeqCounters.keys()) {
+        if (key.startsWith(`${sessionId}:`)) {
+          fileSeqCounters.delete(key);
+        }
+      }
+    }
 
     // Record departure in DB
     await sessionService.removeParticipant(sessionId, socket.user.id);
