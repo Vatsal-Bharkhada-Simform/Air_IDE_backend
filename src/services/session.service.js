@@ -181,12 +181,17 @@ const sessionService = {
    *
    * @param {string} fileId  - File ID
    * @param {string} content - New file content
+   * @param {Buffer} yjsState - New binary Yjs state (optional)
    * @returns {Promise<Object>} Updated file
    */
-  async updateFileContent(fileId, content) {
+  async updateFileContent(fileId, content, yjsState) {
+    const data = { content };
+    if (yjsState) {
+      data.yjsState = yjsState;
+    }
     return prisma.sessionFile.update({
       where: { id: fileId },
-      data: { content },
+      data,
     });
   },
 

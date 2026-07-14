@@ -1,5 +1,6 @@
 const sessionService = require('../services/session.service');
 const presenceHandler = require('./presence.handler');
+const Y = require('yjs');
 
 /**
  * ─────────────────────────────────────────────────────────────────
@@ -81,6 +82,12 @@ const socketSessions = new Map();
  * out-of-order or duplicate deltas (e.g. after a reconnect).
  */
 const fileSeqCounters = new Map();
+
+/**
+ * Yjs documents in memory (Dual-Write Phase)
+ * Map<fileId, Y.Doc>
+ */
+const documents = new Map();
 
 const sessionHandler = {
   /**
@@ -201,6 +208,18 @@ const sessionHandler = {
 
         const file = await sessionService.getFileById(fileId);
 
+        // --- YJS INITIALIZATION (DUAL-WRITE) ---
+        if (!documents.has(fileId)) {
+          const doc = new Y.Doc();
+          if (file.yjsState) {
+            Y.applyUpdate(doc, new Uint8Array(file.yjsState));
+          } else {
+            const ytext = doc.getText('content');
+            ytext.insert(0, file.content || '');
+          }
+          documents.set(fileId, doc);
+        }
+
         // Update cursor to indicate which file the user is viewing
         presenceHandler.updateCursor(sessionId, socket.id, {
           fileId,
@@ -221,45 +240,83 @@ const sessionHandler = {
     });
 
     /**
-     * file:edit — Broadcast a text change to other users.
+     * update — Broadcast a Yjs binary update to other users.
+     * (Replaces the old 'file:edit' custom diff event)
      *
      * Payload: {
      *   sessionId: string,
      *   fileId: string,
-     *   changes: {
-     *     from: { line: number, ch: number },  // Start of change
-     *     to:   { line: number, ch: number },   // End of change
-     *     text: string[]                         // Replacement text lines
-     *   }
+     *   update: Array<number> // Yjs binary update
      * }
      *
      * The change is NOT persisted to the database here — it's only
      * relayed to other connected users for real-time collaboration.
      * Use "file:save" to persist the current state.
-     *
-     * Each broadcast includes a monotonic `seq` number per file so
-     * receivers can detect and discard out-of-order deltas.
      */
-    socket.on('file:edit', (data) => {
-      const { sessionId, fileId, changes } = data;
+    socket.on('update', (data) => {
+      const { sessionId, fileId, update } = data;
 
-      if (!sessionId || !fileId || !changes) {
-        return socket.emit('error', { message: 'Invalid edit data.' });
+      if (!sessionId || !fileId || !update) {
+        return socket.emit('error', { message: 'Invalid update data.' });
       }
 
-      // Increment and stamp the per-file sequence number
-      const seqKey = `${sessionId}:${fileId}`;
-      const seq = (fileSeqCounters.get(seqKey) ?? 0) + 1;
-      fileSeqCounters.set(seqKey, seq);
+      // Apply to server document
+      const doc = documents.get(fileId);
+      if (doc) {
+        try {
+          const updateArray = new Uint8Array(update);
+          Y.applyUpdate(doc, updateArray);
+        } catch (err) {
+          console.error('Yjs update error:', err.message);
+        }
+      }
+      console.log(update);
+      
 
       // Broadcast to everyone else in the session
-      socket.to(sessionId).emit('file:edited', {
+      socket.to(sessionId).emit('update', {
         fileId,
-        changes,
+        update, // Send it exactly as received
         userId: socket.user.id,
         username: socket.user.username,
-        seq,
       });
+    });
+
+    /**
+     * sync-request — (Yjs) Client asks for current document state
+     * Payload: { sessionId, fileId, stateVector }
+     */
+    socket.on('sync-request', async (data) => {
+      try {
+        const { sessionId, fileId, stateVector } = data;
+        let doc = documents.get(fileId);
+        
+        if (!doc) {
+          // Fallback: load from DB if missing (e.g. server restarted)
+          const file = await sessionService.getFileById(fileId);
+          doc = new Y.Doc();
+          if (file.yjsState) {
+            Y.applyUpdate(doc, new Uint8Array(file.yjsState));
+          } else {
+            const ytext = doc.getText('content');
+            ytext.insert(0, file.content || '');
+          }
+          documents.set(fileId, doc);
+        }
+
+        let sv = null;
+        if (stateVector) {
+           sv = new Uint8Array(stateVector);
+        }
+        const update = Y.encodeStateAsUpdate(doc, sv);
+        
+        socket.emit('sync-response', {
+          fileId,
+          update: Array.from(update)
+        });
+      } catch (error) {
+        console.error('sync-request error:', error.message);
+      }
     });
 
     /**
@@ -275,13 +332,21 @@ const sessionHandler = {
      */
     socket.on('file:save', async (data) => {
       try {
-        const { sessionId, fileId, content } = data;
+        const { sessionId, fileId } = data;
 
-        if (!sessionId || !fileId || content == null) {
+        if (!sessionId || !fileId) {
           return socket.emit('error', { message: 'Invalid save data.' });
         }
 
-        await sessionService.updateFileContent(fileId, content);
+        const doc = documents.get(fileId);
+        if (!doc) {
+          return socket.emit('error', { message: 'Document not open in memory.' });
+        }
+
+        const content = doc.getText('content').toString();
+        const yjsState = Buffer.from(Y.encodeStateAsUpdate(doc));
+
+        await sessionService.updateFileContent(fileId, content, yjsState);
 
         // Notify all users in the session (including the saver)
         io.to(sessionId).emit('file:saved', {

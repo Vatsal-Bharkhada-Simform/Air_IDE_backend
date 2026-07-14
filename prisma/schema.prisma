@@ -57,6 +57,7 @@ model SessionFile {
   sessionId String   @map("session_id")
   filename  String                             // e.g. "index.js", "styles.css"
   content   String   @default("") @db.Text     // Full file content stored as text
+  yjsState  Bytes?   @map("yjs_state")         // Yjs binary state
   language  String   @default("plaintext")     // Language hint for syntax highlighting
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
