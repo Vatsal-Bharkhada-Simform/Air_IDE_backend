@@ -13,6 +13,15 @@ const sessionRoutes = require('./routes/session.routes');
 const app = express();
 
 // ──────────────────────────────────────────────
+// Trust Proxy
+// ──────────────────────────────────────────────
+
+// Required when running behind a reverse proxy (e.g. Render, Heroku, Nginx).
+// Tells Express to trust the first proxy hop so that X-Forwarded-For is used
+// correctly for IP detection (needed for express-rate-limit to work properly).
+app.set('trust proxy', 1);
+
+// ──────────────────────────────────────────────
 // Global Middleware
 // ──────────────────────────────────────────────
 
