@@ -195,6 +195,82 @@ const sessionService = {
     });
   },
 
+  /**
+   * Delete a file from a session.
+   *
+   * @param {string} fileId - File ID to delete
+   * @returns {Promise<Object>} Deleted file record
+   * @throws {ApiError} If file not found
+   */
+  async deleteFile(fileId) {
+    const file = await prisma.sessionFile.findUnique({
+      where: { id: fileId },
+    });
+
+    if (!file) {
+      throw ApiError.notFound('File not found.');
+    }
+
+    return prisma.sessionFile.delete({
+      where: { id: fileId },
+    });
+  },
+
+  /**
+   * Rename a file in a session.
+   *
+   * @param {string} fileId      - File ID
+   * @param {string} newFilename - New filename
+   * @returns {Promise<Object>} Updated file record
+   * @throws {ApiError} If file not found or name already taken
+   */
+  async renameFile(fileId, newFilename) {
+    const file = await prisma.sessionFile.findUnique({
+      where: { id: fileId },
+    });
+
+    if (!file) {
+      throw ApiError.notFound('File not found.');
+    }
+
+    // Check for duplicate filename within the same session
+    const existing = await prisma.sessionFile.findUnique({
+      where: { sessionId_filename: { sessionId: file.sessionId, filename: newFilename } },
+    });
+
+    if (existing) {
+      throw ApiError.conflict(`A file named "${newFilename}" already exists in this session.`);
+    }
+
+    return prisma.sessionFile.update({
+      where: { id: fileId },
+      data: { filename: newFilename },
+    });
+  },
+
+  /**
+   * End (close) a session, marking it as inactive.
+   * Only the session creator should call this.
+   *
+   * @param {string} sessionId - Session ID
+   * @returns {Promise<Object>} Updated session record
+   * @throws {ApiError} If session not found
+   */
+  async endSession(sessionId) {
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+    });
+
+    if (!session) {
+      throw ApiError.notFound('Session not found.');
+    }
+
+    return prisma.session.update({
+      where: { id: sessionId },
+      data: { isActive: false },
+    });
+  },
+
   // ──────────────────────────────────────────────
   // Participant tracking
   // ──────────────────────────────────────────────

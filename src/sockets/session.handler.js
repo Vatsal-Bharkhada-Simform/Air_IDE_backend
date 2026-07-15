@@ -7,60 +7,91 @@ const Y = require('yjs');
  * SESSION HANDLER — Room management & file editing events
  * ─────────────────────────────────────────────────────────────────
  *
- * Handles session lifecycle (join/leave rooms) and file operations
- * (open, edit, save) over WebSocket.
+ * Handles session lifecycle (join/leave/end) and file operations
+ * (open, edit, save, delete, rename) over WebSocket.
  *
  * ── Socket Events (Client → Server) ────────────────────────────
  *
- * "session:join"  { inviteCode }
+ * "session:join"   { inviteCode }
  *   → Validates the invite code, joins the socket to the session
  *     room, records participation in DB, adds to presence, and
- *     broadcasts the new user to all others in the room.
+ *     broadcasts the membership change to all others in the room.
  *     Responds with: session details + list of active users.
  *
- * "session:leave" { sessionId }
+ * "session:leave"  { sessionId }
  *   → Removes the socket from the session room, updates DB
  *     participant record, removes from presence, broadcasts
- *     user-left to remaining users.
+ *     membership change to remaining users.
  *
- * "file:open"     { sessionId, fileId }
+ * "session:end"    { sessionId }
+ *   → Creator-only. Marks the session inactive in DB, kicks all
+ *     users, and broadcasts session:ended to the whole room.
+ *
+ * "file:open"      { sessionId, fileId }
  *   → Fetches file content from DB and sends it back to the
  *     requesting socket. Updates the user's presence to show
  *     which file they're viewing.
  *
- * "file:edit"     { sessionId, fileId, changes }
- *   → Broadcasts the edit delta to all OTHER users in the room.
- *     Does NOT persist to DB (use file:save for that).
- *     changes = { from: { line, ch }, to: { line, ch }, text: string[] }
+ * "file:delete"    { sessionId, fileId }
+ *   → Deletes the file from DB, removes its in-memory Y.Doc, and
+ *     broadcasts file:deleted to all users in the room.
  *
- * "file:save"     { sessionId, fileId, content }
- *   → Persists the full file content to the database.
+ * "file:rename"    { sessionId, fileId, newFilename }
+ *   → Renames the file in DB and broadcasts file:renamed to all
+ *     users in the room.
+ *
+ * "file:save"      { sessionId, fileId }
+ *   → Persists the current Yjs document state to the database.
  *     Broadcasts file:saved confirmation to all users in the room.
+ *
+ * "update"         { sessionId, fileId, update: number[] }
+ *   → Applies the Yjs binary update to the server-side Y.Doc and
+ *     relays it to all OTHER users in the room.
+ *
+ * "sync-request"   { sessionId, fileId, stateVector }
+ *   → Client asks for the current document state. Server responds
+ *     with a diff (encodeStateAsUpdate) as sync-response.
  *
  * ── Socket Events (Server → Client) ────────────────────────────
  *
- * "session:joined"      { session, users }
- *   → Sent to the joining user with session details and active users.
+ * "session:joined"     { session, users }
+ *   → Sent ONLY to the joining user with full session details and
+ *     the current active user list.
  *
- * "session:user-joined"  { userId, username, color }
- *   → Broadcast to all OTHER users when someone joins.
+ * "session:membership" { type, users, actor? }
+ *   → Sent to all OTHER users (on join) or ALL users (on leave/sync)
+ *     whenever the presence list changes.
+ *     type:  "joined" | "left" | "full-sync"
+ *     users: always the full, up-to-date SessionUser list
+ *     actor: { userId, username, color } — the user who joined/left
+ *            (omitted for full-sync)
  *
- * "session:user-left"    { userId, username }
- *   → Broadcast to all OTHER users when someone leaves.
+ * "session:ended"      { sessionId, endedBy }
+ *   → Broadcast to ALL users when the creator ends the session.
  *
- * "session:users"        [{ userId, username, color, cursor, selection }]
- *   → Full list of active users (sent on join).
- *
- * "file:content"         { fileId, filename, content, language }
+ * "file:content"       { fileId, filename, content, language }
  *   → Sent to the requesting user when they open a file.
  *
- * "file:edited"          { fileId, changes, userId, username }
- *   → Broadcast to all OTHER users when someone edits a file.
+ * "file:created"       { file: { id, filename, language }, createdBy }
+ *   → Broadcast to ALL users when a new file is created via REST.
+ *     (Emitted from session.controller after the DB write.)
  *
- * "file:saved"           { fileId, savedBy, savedAt }
+ * "file:deleted"       { fileId, deletedBy }
+ *   → Broadcast to ALL users when a file is deleted.
+ *
+ * "file:renamed"       { fileId, newFilename, renamedBy }
+ *   → Broadcast to ALL users when a file is renamed.
+ *
+ * "file:saved"         { fileId, savedBy, savedAt }
  *   → Broadcast to ALL users when a file is saved.
  *
- * "error"                { message }
+ * "update"             { fileId, update: number[], userId, username }
+ *   → Relayed to all OTHER users when someone edits a file.
+ *
+ * "sync-response"      { fileId, update: number[] }
+ *   → Sent to the requesting user with the full document diff.
+ *
+ * "error"              { message }
  *   → Sent to the socket when an operation fails.
  *
  * ─────────────────────────────────────────────────────────────────
@@ -76,18 +107,33 @@ const socketSessions = new Map();
 /**
  * Monotonic per-file sequence counter.
  * Map<"sessionId:fileId", number>
- *
- * Incremented on every file:edit event and stamped onto the outgoing
- * file:edited broadcast. Receivers use this to detect and discard
- * out-of-order or duplicate deltas (e.g. after a reconnect).
  */
 const fileSeqCounters = new Map();
 
 /**
- * Yjs documents in memory (Dual-Write Phase)
+ * Yjs documents in memory.
  * Map<fileId, Y.Doc>
  */
 const documents = new Map();
+
+// ──────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────
+
+/**
+ * Build a serialisable SessionUser array from presence data.
+ * @param {string} sessionId
+ * @returns {Array}
+ */
+function getActiveUsers(sessionId) {
+  return presenceHandler.getSessionUsers(sessionId).map((u) => ({
+    userId: u.userId,
+    username: u.username,
+    color: u.color,
+    cursor: u.cursor,
+    selection: u.selection,
+  }));
+}
 
 const sessionHandler = {
   /**
@@ -107,8 +153,8 @@ const sessionHandler = {
      *   2. Join Socket.IO room (room name = sessionId)
      *   3. Record participation in DB (SessionParticipant)
      *   4. Add user to in-memory presence
-     *   5. Broadcast user-joined to others
-     *   6. Send session details + active users to the joining user
+     *   5. Broadcast session:membership (type: "joined") to others
+     *   6. Send session:joined with details + active users to joining user
      */
     socket.on('session:join', async (data) => {
       try {
@@ -136,16 +182,20 @@ const sessionHandler = {
         // Add to in-memory presence
         const presence = presenceHandler.addUser(session.id, socket.id, socket.user);
 
-        // Notify other users in the session
-        socket.to(session.id).emit('session:user-joined', {
-          userId: socket.user.id,
-          username: socket.user.username,
-          color: presence.color,
+        // Notify other users — send full updated user list + actor
+        const activeUsers = getActiveUsers(session.id);
+
+        socket.to(session.id).emit('session:membership', {
+          type: 'joined',
+          users: activeUsers,
+          actor: {
+            userId: presence.userId,
+            username: presence.username,
+            color: presence.color,
+          },
         });
 
         // Send session info and active users to the joining user
-        const activeUsers = presenceHandler.getSessionUsers(session.id);
-
         socket.emit('session:joined', {
           session: {
             id: session.id,
@@ -154,13 +204,7 @@ const sessionHandler = {
             creator: session.creator,
             files: session.files,
           },
-          users: activeUsers.map((u) => ({
-            userId: u.userId,
-            username: u.username,
-            color: u.color,
-            cursor: u.cursor,
-            selection: u.selection,
-          })),
+          users: activeUsers,
         });
 
         console.log(`📂 ${socket.user.username} joined session "${session.name}" (${session.id})`);
@@ -187,6 +231,64 @@ const sessionHandler = {
       } catch (error) {
         console.error('session:leave error:', error.message);
         socket.emit('error', { message: 'Failed to leave session.' });
+      }
+    });
+
+    /**
+     * session:end — Creator ends the session for all participants.
+     *
+     * Payload: { sessionId: string }
+     *
+     * Only the session creator is permitted to end the session.
+     * All users are kicked from the room and receive session:ended.
+     */
+    socket.on('session:end', async (data) => {
+      try {
+        const { sessionId } = data;
+
+        if (!sessionId) {
+          return socket.emit('error', { message: 'Session ID is required.' });
+        }
+
+        // Load session to verify the requester is the creator
+        const prisma = require('../config/db');
+        const sessionRecord = await prisma.session.findUnique({
+          where: { id: sessionId },
+          select: { createdBy: true, name: true },
+        });
+
+        if (!sessionRecord) {
+          return socket.emit('error', { message: 'Session not found.' });
+        }
+
+        if (sessionRecord.createdBy !== socket.user.id) {
+          return socket.emit('error', { message: 'Only the session creator can end the session.' });
+        }
+
+        // Mark session as inactive in DB
+        await sessionService.endSession(sessionId);
+
+        // Broadcast to ALL users in the room (including the creator)
+        io.to(sessionId).emit('session:ended', {
+          sessionId,
+          endedBy: socket.user.username,
+        });
+
+        // Clean up presence for all sockets in this room
+        // Socket.IO rooms are cleaned up automatically when sockets leave
+        io.in(sessionId).socketsLeave(sessionId);
+
+        // Clean up per-file seq counters for this session
+        for (const key of fileSeqCounters.keys()) {
+          if (key.startsWith(`${sessionId}:`)) {
+            fileSeqCounters.delete(key);
+          }
+        }
+
+        console.log(`🔒 ${socket.user.username} ended session "${sessionRecord.name}" (${sessionId})`);
+      } catch (error) {
+        console.error('session:end error:', error.message);
+        socket.emit('error', { message: 'Failed to end session.' });
       }
     });
 
@@ -240,8 +342,80 @@ const sessionHandler = {
     });
 
     /**
+     * file:delete — Delete a file from the session.
+     *
+     * Payload: { sessionId: string, fileId: string }
+     *
+     * Any participant may delete a file. The file is removed from DB,
+     * its in-memory Y.Doc is destroyed, and file:deleted is broadcast
+     * to all users so they can close the tab.
+     */
+    socket.on('file:delete', async (data) => {
+      try {
+        const { sessionId, fileId } = data;
+
+        if (!sessionId || !fileId) {
+          return socket.emit('error', { message: 'Session ID and file ID are required.' });
+        }
+
+        await sessionService.deleteFile(fileId);
+
+        // Remove in-memory Yjs document
+        if (documents.has(fileId)) {
+          documents.get(fileId).destroy();
+          documents.delete(fileId);
+        }
+
+        // Remove seq counters for this file
+        fileSeqCounters.delete(`${sessionId}:${fileId}`);
+
+        // Broadcast to ALL users so they close the tab
+        io.to(sessionId).emit('file:deleted', {
+          fileId,
+          deletedBy: socket.user.username,
+        });
+
+        console.log(`🗑️  ${socket.user.username} deleted file ${fileId}`);
+      } catch (error) {
+        console.error('file:delete error:', error.message);
+        socket.emit('error', { message: error.message || 'Failed to delete file.' });
+      }
+    });
+
+    /**
+     * file:rename — Rename a file in the session.
+     *
+     * Payload: { sessionId: string, fileId: string, newFilename: string }
+     *
+     * Any participant may rename a file. The new name is persisted to DB
+     * and file:renamed is broadcast to all users.
+     */
+    socket.on('file:rename', async (data) => {
+      try {
+        const { sessionId, fileId, newFilename } = data;
+
+        if (!sessionId || !fileId || !newFilename) {
+          return socket.emit('error', { message: 'Session ID, file ID, and new filename are required.' });
+        }
+
+        await sessionService.renameFile(fileId, newFilename.trim());
+
+        // Broadcast to ALL users so they update tab labels and file lists
+        io.to(sessionId).emit('file:renamed', {
+          fileId,
+          newFilename: newFilename.trim(),
+          renamedBy: socket.user.username,
+        });
+
+        console.log(`✏️  ${socket.user.username} renamed file ${fileId} to "${newFilename}"`);
+      } catch (error) {
+        console.error('file:rename error:', error.message);
+        socket.emit('error', { message: error.message || 'Failed to rename file.' });
+      }
+    });
+
+    /**
      * update — Broadcast a Yjs binary update to other users.
-     * (Replaces the old 'file:edit' custom diff event)
      *
      * Payload: {
      *   sessionId: string,
@@ -270,27 +444,26 @@ const sessionHandler = {
           console.error('Yjs update error:', err.message);
         }
       }
-      console.log(update);
-      
 
       // Broadcast to everyone else in the session
       socket.to(sessionId).emit('update', {
         fileId,
-        update, // Send it exactly as received
+        update,
         userId: socket.user.id,
         username: socket.user.username,
       });
     });
 
     /**
-     * sync-request — (Yjs) Client asks for current document state
+     * sync-request — Client asks for current document state.
+     *
      * Payload: { sessionId, fileId, stateVector }
      */
     socket.on('sync-request', async (data) => {
       try {
         const { sessionId, fileId, stateVector } = data;
         let doc = documents.get(fileId);
-        
+
         if (!doc) {
           // Fallback: load from DB if missing (e.g. server restarted)
           const file = await sessionService.getFileById(fileId);
@@ -306,13 +479,13 @@ const sessionHandler = {
 
         let sv = null;
         if (stateVector) {
-           sv = new Uint8Array(stateVector);
+          sv = new Uint8Array(stateVector);
         }
         const update = Y.encodeStateAsUpdate(doc, sv);
-        
+
         socket.emit('sync-response', {
           fileId,
-          update: Array.from(update)
+          update: Array.from(update),
         });
       } catch (error) {
         console.error('sync-request error:', error.message);
@@ -324,8 +497,7 @@ const sessionHandler = {
      *
      * Payload: {
      *   sessionId: string,
-     *   fileId: string,
-     *   content: string     // Full file content
+     *   fileId: string
      * }
      *
      * Saves to PostgreSQL and broadcasts confirmation to all users.
@@ -391,7 +563,6 @@ const sessionHandler = {
     // Clean up per-file sequence counters for this session if no users remain
     const remainingUsers = presenceHandler.getSessionUsers(sessionId);
     if (remainingUsers.length === 0) {
-      // Delete all seq counters whose key starts with this sessionId
       for (const key of fileSeqCounters.keys()) {
         if (key.startsWith(`${sessionId}:`)) {
           fileSeqCounters.delete(key);
@@ -402,22 +573,19 @@ const sessionHandler = {
     // Record departure in DB
     await sessionService.removeParticipant(sessionId, socket.user.id);
 
-    // Notify remaining users
+    // Broadcast session:membership (type: "left") to remaining users with updated list
     if (presence) {
-      socket.to(sessionId).emit('session:user-left', {
-        userId: presence.userId,
-        username: presence.username,
-      });
+      const activeUsers = getActiveUsers(sessionId);
 
-      // Send updated user list
-      const activeUsers = presenceHandler.getSessionUsers(sessionId);
-      io.to(sessionId).emit('session:users', activeUsers.map((u) => ({
-        userId: u.userId,
-        username: u.username,
-        color: u.color,
-        cursor: u.cursor,
-        selection: u.selection,
-      })));
+      io.to(sessionId).emit('session:membership', {
+        type: 'left',
+        users: activeUsers,
+        actor: {
+          userId: presence.userId,
+          username: presence.username,
+          color: presence.color,
+        },
+      });
     }
 
     console.log(`👋 ${socket.user.username} left session ${sessionId}`);

@@ -157,6 +157,21 @@ const sessionController = {
                 content,
             });
 
+            // Broadcast to all connected users in the session room so their
+            // file lists update without requiring a manual refetch.
+            // io is stored on the Express app instance in server.js via app.set('io', io).
+            const io = req.app.get('io');
+            if (io) {
+                io.to(sessionId).emit('file:created', {
+                    file: {
+                        id: file.id,
+                        filename: file.filename,
+                        language: file.language,
+                    },
+                    createdBy: req.user.username,
+                });
+            }
+
             res.status(201).json({
                 success: true,
                 message: 'File created successfully.',
