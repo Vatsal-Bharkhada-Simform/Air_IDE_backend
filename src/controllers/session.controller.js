@@ -53,7 +53,10 @@ const sessionController = {
 
     /**
      * GET /api/sessions
-     * List all sessions the current user has created or joined.
+     * GET /api/sessions?role=owner       — sessions the user created
+     * GET /api/sessions?role=participant — sessions the user joined but doesn't own
+     *
+     * List sessions the current user is involved in, optionally filtered by role.
      *
      * Response: {
      *   success: boolean,
@@ -74,7 +77,16 @@ const sessionController = {
      */
     async list(req, res, next) {
         try {
-            const sessions = await sessionService.listUserSessions(req.user.id);
+            // Only accept the two documented values; anything else is silently
+            // ignored and falls through to the default (all sessions).
+            const { role } = req.query;
+            const validRole =
+                role === 'owner' || role === 'participant' ? role : undefined;
+
+            const sessions = await sessionService.listUserSessions(
+                req.user.id,
+                validRole
+            );
 
             res.status(200).json({
                 success: true,
@@ -114,6 +126,102 @@ const sessionController = {
             res.status(200).json({
                 success: true,
                 data: { session },
+            });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    /**
+     * PATCH /api/sessions/:id/status
+     * Toggle the session's isActive flag (close or reopen).
+     * Only the session owner may call this (enforced by requireSessionOwner middleware).
+     *
+     * Body: { isActive: boolean }
+     * Response: {
+     *   success: boolean,
+     *   message: string,
+     *   data: { session: { id, name, isActive, ... } }
+     * }
+     */
+    async updateStatus(req, res, next) {
+        try {
+            const { id: sessionId } = req.params;
+            const { isActive } = req.body;
+
+            if (typeof isActive !== 'boolean') {
+                throw ApiError.badRequest('isActive must be a boolean.');
+            }
+
+            const session = await sessionService.updateSessionStatus(sessionId, isActive);
+
+            // Notify all connected clients so they can redirect / show a banner
+            const io = req.app.get('io');
+            if (io && !isActive) {
+                io.to(sessionId).emit('session:ended', { sessionId });
+            }
+
+            res.status(200).json({
+                success: true,
+                message: `Session ${isActive ? 'reopened' : 'closed'} successfully.`,
+                data: { session },
+            });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    /**
+     * DELETE /api/sessions/:id
+     * Permanently delete a session and all its files (cascade).
+     * Only the session owner may call this (enforced by requireSessionOwner middleware).
+     *
+     * Response: 204 No Content
+     */
+    async deleteSession(req, res, next) {
+        try {
+            const { id: sessionId } = req.params;
+
+            // Notify clients before the session is gone so they can clean up
+            const io = req.app.get('io');
+            if (io) {
+                io.to(sessionId).emit('session:ended', { sessionId });
+            }
+
+            await sessionService.deleteSession(sessionId);
+
+            res.status(204).send();
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    /**
+     * GET /api/sessions/:id/participants
+     * List participant history (join/leave times) for a session.
+     * Only the session owner may call this (enforced by requireSessionOwner middleware).
+     *
+     * Response: {
+     *   success: boolean,
+     *   data: {
+     *     participants: [{
+     *       id: string,
+     *       userId: string,
+     *       joinedAt: string,
+     *       leftAt: string | null,
+     *       user: { id: string, username: string }
+     *     }]
+     *   }
+     * }
+     */
+    async listParticipants(req, res, next) {
+        try {
+            const { id: sessionId } = req.params;
+            const participants = await sessionService.getParticipants(sessionId);
+
+            res.status(200).json({
+                success: true,
+                data: { participants },
             });
         } catch (error) {
             next(error);
@@ -208,6 +316,106 @@ const sessionController = {
                 success: true,
                 data: { files },
             });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    /**
+     * GET /api/sessions/:id/files/:fileId
+     * Get a single file's full content.
+     *
+     * Response: {
+     *   success: boolean,
+     *   data: {
+     *     file: {
+     *       id: string,
+     *       sessionId: string,
+     *       filename: string,
+     *       content: string,
+     *       language: string,
+     *       createdAt: string,
+     *       updatedAt: string
+     *     }
+     *   }
+     * }
+     */
+    async getFile(req, res, next) {
+        try {
+            const { fileId } = req.params;
+            const file = await sessionService.getFileById(fileId);
+
+            res.status(200).json({
+                success: true,
+                data: { file },
+            });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    /**
+     * PATCH /api/sessions/:id/files/:fileId/rename
+     * Rename a file within a session.
+     *
+     * Body: { newFilename: string }
+     * Response: {
+     *   success: boolean,
+     *   message: string,
+     *   data: { file: { id, filename, ... } }
+     * }
+     */
+    async renameFile(req, res, next) {
+        try {
+            const { id: sessionId, fileId } = req.params;
+            const { newFilename } = req.body;
+
+            if (!newFilename || !newFilename.trim()) {
+                throw ApiError.badRequest('New filename is required.');
+            }
+
+            const file = await sessionService.renameFile(fileId, newFilename.trim());
+
+            const io = req.app.get('io');
+            if (io) {
+                io.to(sessionId).emit('file:renamed', {
+                    fileId: file.id,
+                    newFilename: file.filename,
+                    renamedBy: req.user.username,
+                });
+            }
+
+            res.status(200).json({
+                success: true,
+                message: 'File renamed successfully.',
+                data: { file },
+            });
+        } catch (error) {
+            next(error);
+        }
+    },
+
+    /**
+     * DELETE /api/sessions/:id/files/:fileId
+     * Delete a file from a session.
+     *
+     * Response: 204 No Content
+     */
+    async deleteFile(req, res, next) {
+        try {
+            const { id: sessionId, fileId } = req.params;
+
+            await sessionService.deleteFile(fileId);
+
+            const io = req.app.get('io');
+            if (io) {
+                io.to(sessionId).emit('file:deleted', {
+                    fileId,
+                    deletedBy: req.user.username,
+                });
+            }
+
+            res.status(204).send();
         } catch (error) {
             next(error);
         }

@@ -47,19 +47,37 @@ const sessionService = {
   },
 
   /**
-   * List all sessions a user has created or participated in.
+   * List sessions for a user, optionally filtered by their role.
    *
    * @param {string} userId - User ID
+   * @param {'owner'|'participant'|undefined} role
+   *   - 'owner':       sessions the user created
+   *   - 'participant': sessions the user joined but does not own
+   *   - undefined:     all sessions (owner OR participant) — backward-compatible
    * @returns {Promise<Array>} Sessions array
    */
-  async listUserSessions(userId) {
-    const sessions = await prisma.session.findMany({
-      where: {
+  async listUserSessions(userId, role) {
+    let where;
+
+    if (role === 'owner') {
+      where = { createdBy: userId };
+    } else if (role === 'participant') {
+      where = {
+        participants: { some: { userId } },
+        NOT: { createdBy: userId },
+      };
+    } else {
+      // Default: all sessions this user is involved in
+      where = {
         OR: [
           { createdBy: userId },
           { participants: { some: { userId } } },
         ],
-      },
+      };
+    }
+
+    const sessions = await prisma.session.findMany({
+      where,
       include: {
         creator: { select: { id: true, username: true } },
         _count: { select: { files: true, participants: true } },
@@ -249,14 +267,16 @@ const sessionService = {
   },
 
   /**
-   * End (close) a session, marking it as inactive.
+   * Update a session's active state.
+   * Use to close (isActive=false) or reopen (isActive=true) a session.
    * Only the session creator should call this.
    *
-   * @param {string} sessionId - Session ID
+   * @param {string}  sessionId - Session ID
+   * @param {boolean} isActive  - Desired active state
    * @returns {Promise<Object>} Updated session record
    * @throws {ApiError} If session not found
    */
-  async endSession(sessionId) {
+  async updateSessionStatus(sessionId, isActive) {
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
     });
@@ -267,7 +287,50 @@ const sessionService = {
 
     return prisma.session.update({
       where: { id: sessionId },
-      data: { isActive: false },
+      data: { isActive },
+      include: {
+        creator: { select: { id: true, username: true } },
+      },
+    });
+  },
+
+  /**
+   * Hard-delete a session and all its files.
+   * SessionFile rows are removed via the onDelete: Cascade constraint.
+   * Only the session creator should call this.
+   *
+   * @param {string} sessionId - Session ID
+   * @returns {Promise<Object>} Deleted session record
+   * @throws {ApiError} If session not found
+   */
+  async deleteSession(sessionId) {
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+    });
+
+    if (!session) {
+      throw ApiError.notFound('Session not found.');
+    }
+
+    return prisma.session.delete({
+      where: { id: sessionId },
+    });
+  },
+
+  /**
+   * Get the participant history for a session.
+   * Returns all join/leave records with basic user info, newest first.
+   *
+   * @param {string} sessionId - Session ID
+   * @returns {Promise<Array>} Participant records
+   */
+  async getParticipants(sessionId) {
+    return prisma.sessionParticipant.findMany({
+      where: { sessionId },
+      include: {
+        user: { select: { id: true, username: true } },
+      },
+      orderBy: { joinedAt: 'desc' },
     });
   },
 
