@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
+const morgan = require('morgan');
 const env = require('./config/env');
 const errorMiddleware = require('./middlewares/error.middleware');
 
@@ -31,6 +32,9 @@ app.use(express.urlencoded({ extended: true }));
 
 // Parse cookies (needed for httpOnly JWT cookie)
 app.use(cookieParser());
+
+// HTTP request logger — 'dev' in development, 'combined' in production
+app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // ──────────────────────────────────────────────
 // Rate Limiting
