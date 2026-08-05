@@ -9,7 +9,8 @@
     "db:generate": "npx prisma generate",
     "db:push": "npx prisma db push",
     "db:migrate": "npx prisma migrate dev",
-    "db:studio": "npx prisma studio"
+    "db:studio": "npx prisma studio",
+    "db:backfill-avatars": "node src/scripts/backfill-avatar-seeds.js"
   },
   "keywords": [
     "collaborative-editor",

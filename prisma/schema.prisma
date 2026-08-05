@@ -18,6 +18,7 @@ model User {
   username     String   @unique
   email        String   @unique
   passwordHash String   @map("password_hash")
+  avatarSeed   String?  @map("avatar_seed")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 

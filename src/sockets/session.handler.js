@@ -129,6 +129,7 @@ function getActiveUsers(sessionId) {
   return presenceHandler.getSessionUsers(sessionId).map((u) => ({
     userId: u.userId,
     username: u.username,
+    avatarSeed: u.avatarSeed ?? null,
     color: u.color,
     cursor: u.cursor,
     selection: u.selection,

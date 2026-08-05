@@ -136,10 +136,17 @@ function initializeSocket(httpServer) {
       }
 
       // Attach user info to the socket for use in event handlers
+      // Fetch avatarSeed from DB — not embedded in JWT
+      const dbUser = await prisma.user.findUnique({
+        where: { id: decoded.id },
+        select: { avatarSeed: true },
+      });
+
       socket.user = {
         id: decoded.id,
         email: decoded.email,
         username: decoded.username,
+        avatarSeed: dbUser?.avatarSeed ?? null,
       };
 
       next();

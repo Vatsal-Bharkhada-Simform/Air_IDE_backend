@@ -112,6 +112,26 @@ const authService = {
   // ──────────────────────────────────────────────
 
   /**
+   * Fetch a unique avatar seed from the avatar engine worker.
+   * The response is an SVG whose root element has a `data-seed` attribute
+   * containing the deterministic seed string.
+   *
+   * @returns {Promise<string|null>} Seed string, or null if the request fails
+   */
+  async fetchAvatarSeed() {
+    try {
+      const response = await fetch('https://avatar-engine.vatsal-bharkhada.workers.dev/avatar');
+      const svg = await response.text();
+      // Extract data-seed="..." from the SVG markup
+      const match = svg.match(/data-seed="([^"]+)"/);
+      return match ? match[1] : null;
+    } catch (err) {
+      console.warn('Avatar engine unreachable — skipping seed assignment:', err.message);
+      return null;
+    }
+  },
+
+  /**
    * Register a new user.
    * @param {Object} data - { username, email, password }
    * @returns {Promise<Object>} Created user (without password hash)
@@ -132,12 +152,16 @@ const authService = {
 
     const passwordHash = await this.hashPassword(password);
 
+    // Fetch a unique avatar seed from the avatar engine
+    const avatarSeed = await this.fetchAvatarSeed();
+
     const user = await prisma.user.create({
-      data: { username, email, passwordHash },
+      data: { username, email, passwordHash, avatarSeed },
       select: {
         id: true,
         username: true,
         email: true,
+        avatarSeed: true,
         createdAt: true,
       },
     });
@@ -172,6 +196,7 @@ const authService = {
         id: user.id,
         username: user.username,
         email: user.email,
+        avatarSeed: user.avatarSeed ?? null,
       },
       token,
     };

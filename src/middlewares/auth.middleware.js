@@ -58,10 +58,17 @@ async function authMiddleware(req, res, next) {
     }
 
     // ── Attach user to request ───────────────────
+    // Fetch avatarSeed from DB — it's not embedded in the JWT
+    const dbUser = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: { avatarSeed: true },
+    });
+
     req.user = {
       id: decoded.id,
       email: decoded.email,
       username: decoded.username,
+      avatarSeed: dbUser?.avatarSeed ?? null,
     };
 
     // Store the raw token and jti for logout

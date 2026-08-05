@@ -22,6 +22,7 @@ const { assignCursorColor } = require('../utils/helpers');
  * UserPresence = {
  *   userId:    string,   // DB user ID
  *   username:  string,   // Display name
+ *   avatarSeed: string|null, // Seed for SVG avatar
  *   color:     string,   // Hex color for cursor/selection highlight
  *   cursor: {
  *     fileId:  string,   // Which file the user is editing
@@ -85,6 +86,7 @@ const presenceHandler = {
     const presence = {
       userId: user.id,
       username: user.username,
+      avatarSeed: user.avatarSeed ?? null,
       color: assignCursorColor(colorIndex),
       cursor: { fileId: null, line: 1, column: 0 },
       selection: null,
